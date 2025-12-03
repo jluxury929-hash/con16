@@ -1,27 +1,26 @@
 {
-  "name": "crypto-treasury-server",
+  "name": "flashbots-mev-backend",
   "version": "1.0.0",
-  "description": "An Express backend for managing and sweeping ETH from a treasury wallet.",
+  "description": "MEV Earning Backend utilizing Flashbots for atomic bundle execution.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [
-    "express",
-    "ethers",
-    "ethereum",
-    "crypto"
-  ],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
+    "express": "^4.18.2",
     "cors": "^2.8.5",
     "ethers": "^5.7.2",
-    "express": "^4.19.2",
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^2.6.9",
+    "@flashbots/ethers-provider-bundle": "^0.14.0"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  }
+  "keywords": [
+    "mev",
+    "flashbots",
+    "ethereum",
+    "ethers",
+    "arbitrage"
+  ],
+  "author": "",
+  "license": "ISC"
 }
