@@ -3,147 +3,140 @@ const cors = require('cors');
 const { ethers } = require('ethers');
 
 // --- Configuration & Security ---
-// It is CRITICAL to load sensitive information from environment variables.
-// In a production environment, you would use a package like 'dotenv' locally,
-// but deployment platforms typically inject these variables directly.
 const PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY;
 const DESTINATION_ADDRESS = process.env.SWEEP_DESTINATION_ADDRESS || '0xRecipientAddressGoesHere';
-// Using a placeholder public endpoint. Replace with your Infura/Alchemy URL in production.
-const ETHERS_PROVIDER_URL = process.env.ETHERS_PROVIDER_URL || 'https://cloudflare-eth.com'; 
+const ETHERS_PROVIDER_URL = process.env.ETHERS_PROVIDER_URL || 'https://cloudflare-eth.com';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize Provider and Wallet
-const provider = new ethers.providers.JsonRpcProvider(ETHERS_PROVIDER_URL);
+// ------------------ ETHERS v6 FIXES ------------------
+// v5: new ethers.providers.JsonRpcProvider()
+// v6: new ethers.JsonRpcProvider()
+const provider = new ethers.JsonRpcProvider(ETHERS_PROVIDER_URL);
 
-// The signer (Wallet) is used to sign and send transactions.
+// Wallet initialization
 let treasuryWallet;
+
 if (!PRIVATE_KEY) {
-    console.error("FATAL ERROR: TREASURY_PRIVATE_KEY is not set. Sweep functionality will not work.");
-    // Use a placeholder object if the key is missing to prevent immediate crash
+    console.error("FATAL ERROR: TREASURY_PRIVATE_KEY is not set.");
+
     treasuryWallet = { 
-        address: '0xTreasuryWalletPlaceholder', 
-        sendTransaction: async () => { throw new Error("Wallet not initialized: Missing private key."); },
-        getBalance: async () => ethers.utils.parseEther("0.0") 
+        address: '0xTreasuryWalletPlaceholder',
+        sendTransaction: async () => { throw new Error("Wallet not initialized."); },
+        getBalance: async () => 0n 
     };
 } else {
-    // Initialize the wallet using the private key and the provider
-    treasuryWallet = new ethers.Wallet(PRIVATE_KEY, provider); 
+    treasuryWallet = new ethers.Wallet(PRIVATE_KEY, provider);
 }
 
-
 // --- Middleware ---
-app.use(cors()); // Enable CORS for all routes (important for front-end access)
-app.use(express.json()); // Enable JSON body parsing for POST requests
+app.use(cors());
+app.use(express.json());
 
-// Middleware for basic logging
+// Logging middleware
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
     next();
 });
 
-
-// --- Routes ---
-
-/**
- * @route GET /health
- * @description Simple health check route to verify server status.
- */
+// ─────────────────────────────────────────────
+// GET /health
+// ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
     res.status(200).json({ 
-        status: 'ok', 
-        version: '1.0.0', 
+        status: 'ok',
+        version: '1.0.0',
         walletAddress: treasuryWallet.address,
         isSweepConfigured: !!PRIVATE_KEY 
     });
 });
 
-/**
- * @route POST /api/sweep/eth
- * @description Initiates the process to sweep all available ETH from the treasury wallet
- * to the configured destination address.
- */
+// ─────────────────────────────────────────────
+// POST /api/sweep/eth
+// Sweeps all ETH from wallet (minus gas)
+// ─────────────────────────────────────────────
 app.post('/api/sweep/eth', async (req, res) => {
     if (!PRIVATE_KEY) {
         return res.status(503).json({ 
-            error: "Service Unavailable: Server is not configured for sweeping (private key missing)." 
+            error: "Service Unavailable: Missing private key." 
         });
     }
 
     try {
-        // Allow destination to be overridden in the request body for flexibility
         const destination = req.body.destination || DESTINATION_ADDRESS;
-        if (!ethers.utils.isAddress(destination)) {
-            return res.status(400).json({ error: "Invalid destination address provided." });
+
+        // v6: ethers.isAddress()
+        if (!ethers.isAddress(destination)) {
+            return res.status(400).json({ error: "Invalid destination address." });
         }
 
-        // 1. Get current balance and gas price
-        const balance = await treasuryWallet.getBalance();
-        const gasPrice = await provider.getGasPrice();
-        
-        // Use a standard gas limit for simple ETH transfers
-        const gasLimit = ethers.BigNumber.from(21000); 
-        
-        // Calculate the maximum transaction fee (gasPrice * gasLimit)
-        const gasCost = gasPrice.mul(gasLimit);
+        // 1. Retrieve balance & gas price
+        const balance = await treasuryWallet.getBalance();  // returns bigint in v6
+        const gasPrice = await provider.getGasPrice();      // bigint
 
-        // Check for sufficient balance to cover the gas fee
-        if (balance.lt(gasCost)) {
-            console.log(`Balance too low. Balance: ${ethers.utils.formatEther(balance)} ETH, Gas Cost: ${ethers.utils.formatEther(gasCost)} ETH`);
-            return res.status(200).json({ 
-                message: "Balance is too low to cover the transaction gas cost.",
-                balance: ethers.utils.formatEther(balance),
-                gasCost: ethers.utils.formatEther(gasCost)
-            });
-        }
-        
-        // 2. Calculate the amount to send (Total balance - Gas Cost)
-        const amountToSend = balance.sub(gasCost);
+        const gasLimit = 21000n;
+        const gasCost = gasPrice * gasLimit;
 
-        if (amountToSend.isZero()) {
-             return res.status(200).json({ 
-                message: "Calculated sweep amount is zero after deducting gas.",
-                balance: ethers.utils.formatEther(balance)
+        // Not enough ETH to pay gas
+        if (balance < gasCost) {
+            return res.status(200).json({
+                message: "Balance is too low to cover gas.",
+                balance: ethers.formatEther(balance),
+                gasCost: ethers.formatEther(gasCost)
             });
         }
 
-        // 3. Construct and send the transaction
+        // 2. Calculate amount to send
+        const amountToSend = balance - gasCost;
+
+        if (amountToSend <= 0n) {
+            return res.status(200).json({
+                message: "Sweep amount is zero after gas deduction.",
+                balance: ethers.formatEther(balance)
+            });
+        }
+
+        // 3. Create the transaction (v6 syntax)
         const tx = {
             to: destination,
             value: amountToSend,
             gasPrice: gasPrice,
-            gasLimit: gasLimit,
+            gasLimit: gasLimit
         };
 
-        console.log(`Sweeping ${ethers.utils.formatEther(amountToSend)} ETH to ${destination}`);
-        const transactionResponse = await treasuryWallet.sendTransaction(tx);
+        console.log(`Sweeping ${ethers.formatEther(amountToSend)} ETH → ${destination}`);
 
-        // 4. Respond to the user
+        const txResponse = await treasuryWallet.sendTransaction(tx);
+
+        // 4. Response
         res.status(200).json({
-            message: 'ETH sweep transaction submitted successfully.',
-            transactionHash: transactionResponse.hash,
-            amountSent: ethers.utils.formatEther(amountToSend),
+            message: "Sweep transaction submitted.",
+            transactionHash: txResponse.hash,
+            amountSent: ethers.formatEther(amountToSend),
             destination: destination,
-            // Provide a network link (e.g., Etherscan) for verification
-            networkLink: `https://etherscan.io/tx/${transactionResponse.hash}` 
+            networkLink: `https://etherscan.io/tx/${txResponse.hash}`
         });
 
-    } catch (error) {
-        console.error('Sweep failed:', error);
-        // Respond with a 500 status and details about the failure
-        res.status(500).json({ 
-            error: 'Failed to execute ETH sweep transaction.', 
-            details: error.reason || error.message 
+    } catch (err) {
+        console.error("Sweep failed:", err);
+
+        res.status(500).json({
+            error: "Sweep transaction failed.",
+            details: err?.reason || err?.message || String(err)
         });
     }
 });
 
-// --- Start Server ---
+// ─────────────────────────────────────────────
+// Start Server
+// ─────────────────────────────────────────────
 app.listen(PORT, () => {
     console.log(`Crypto Treasury Server running on port ${PORT}`);
     console.log(`Treasury Wallet Address: ${treasuryWallet.address}`);
+
     if (!PRIVATE_KEY) {
-        console.log("WARNING: Set TREASURY_PRIVATE_KEY environment variable to enable sweeping.");
+        console.log("WARNING: Set TREASURY_PRIVATE_KEY to enable sweeping.");
     }
 });
+
